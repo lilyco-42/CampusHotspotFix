@@ -428,6 +428,7 @@ namespace CampusHotspotFix.Forms
         private void RunFix(string ssid, string key, CancellationToken token)
         {
             var results = new List<FixResult>();
+            bool hotspotIcsSkip = false; // 移动热点自带 ICS,不覆盖
 
             // Step 1: 检测承载网络支持 (仅做提示,不阻塞流程)
             SafeAppend("[步骤 1/5] 检测网卡驱动...");
@@ -467,7 +468,10 @@ namespace CampusHotspotFix.Forms
                     else if (_mobileHotspotService.IsHotspotRunning())
                     {
                         SafeAppend("[P1] ✅ 移动热点已在运行中");
+                        SafeAppend("[P1] ℹ️ Windows 已自带 ICS 配置,跳过工具绑定");
                         hotspotOk = true;
+                        // 标记:移动热点已有自己的 ICS,不覆盖
+                        hotspotIcsSkip = true;
                     }
                     else
                     {
@@ -500,7 +504,16 @@ namespace CampusHotspotFix.Forms
             // Step 3: 绑定 ICS 共享
             SafeAppend("[步骤 3/5] 绑定 ICS 共享...");
 
-            var pppoeAdapters = _adapterService.GetDialupAdapters();
+            if (hotspotIcsSkip)
+            {
+                SafeAppend("[P2] ℹ️ 移动热点已在运行,Windows 自带 ICS 配置保留不动");
+                var (mhSsid, mhPwd) = _mobileHotspotService.GetHotspotCredentials();
+                SafeAppend($"[P2] 📶 手机连接 Wi-Fi: \"{mhSsid}\"  密码: \"{mhPwd}\"");
+                results.Add(FixResult.Ok(ProblemCode.P2_IcsShareNotBound, "移动热点自带 ICS,无需额外绑定"));
+            }
+            else
+            {
+                var pppoeAdapters = _adapterService.GetDialupAdapters();
             var virtualAdapters = _adapterService.GetHostedNetworkAdapters();
 
             if (pppoeAdapters.Count == 0)
@@ -551,6 +564,7 @@ namespace CampusHotspotFix.Forms
                 }
 
                 token.ThrowIfCancellationRequested();
+                }
             }
 
             // Step 4: 电源管理优化
@@ -587,7 +601,7 @@ namespace CampusHotspotFix.Forms
                 SafeAppend("部分项目修复失败,请根据错误信息排查。");
             }
 
-            if (hotspotOk && _mobileHotspotService.IsHotspotRunning())
+            if (_mobileHotspotService.IsHotspotRunning())
             {
                 var (mhSsid, mhPwd) = _mobileHotspotService.GetHotspotCredentials();
                 SafeAppend($"Windows 移动热点 SSID: \"{mhSsid}\"  密码: \"{mhPwd}\"");
