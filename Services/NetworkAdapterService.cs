@@ -115,42 +115,55 @@ namespace CampusHotspotFix.Services
         }
 
         /// <summary>
-        /// 检测网卡驱动是否支持承载网络(Hosted Network)。
-        /// 先用 netsh 正则匹配,如果匹配不到但系统中已经存在虚拟热点适配器,
-        /// 说明硬件肯定是支持的,直接返回 true 作为兜底。
+        /// 检测网卡驱动是否支持承载网络/SoftAP。
+        /// 双重检测:
+        ///   1. netsh wlan show drivers → 旧版承载网络
+        ///   2. netsh wlan show wirelesscapabilities → 新版 SoftAP
+        ///
+        /// 只要其中任何一个返回支持,就 return true。
+        /// 都不支持且有虚拟适配器 → false (适配器可能是旧操作遗留,当前驱动已不支持)
         /// </summary>
         public bool? IsHostedNetworkSupported(out string rawOutput)
         {
-            var result = CommandRunner.Run("netsh", "wlan show drivers");
-            rawOutput = result.StandardOutput;
+            rawOutput = "";
 
-            if (!result.ProcessExitedNormally)
+            // ---- 检测1: 传统承载网络 ----
+            var driverResult = CommandRunner.Run("netsh", "wlan show drivers");
+
+            if (driverResult.ProcessExitedNormally)
             {
-                return null;
+                rawOutput = driverResult.StandardOutput;
+
+                var match = Regex.Match(
+                    driverResult.StandardOutput,
+                    @"(支持的承载网络|Hosted network supported|支持托管网络)\s*[:：]?\s*(是|Yes|否|No|True|False)",
+                    RegexOptions.IgnoreCase);
+
+                if (match.Success)
+                {
+                    var value = match.Groups[2].Value;
+                    if (value is "是" or "Yes" or "True")
+                        return true;
+                    // 明确否 → 继续检测 SoftAP (可能新版驱动通过 WDI 支持)
+                }
             }
 
-            // 尝试正则匹配 —— 兼容中英文
-            var match = Regex.Match(
-                result.StandardOutput,
-                @"(支持的承载网络|Hosted network supported|支持托管网络)\s*[:：]?\s*(是|Yes|否|No|True|False)",
-                RegexOptions.IgnoreCase);
-
-            if (match.Success)
+            // ---- 检测2: WDI SoftAP 能力 ----
+            var wdiResult = CommandRunner.Run("netsh", "wlan show wirelesscapabilities");
+            if (wdiResult.ProcessExitedNormally)
             {
-                var value = match.Groups[2].Value;
-                return value is "是" or "Yes" or "True";
+                rawOutput += "\r\n" + wdiResult.StandardOutput;
+                if (wdiResult.StandardOutput.Contains("Soft AP") &&
+                    wdiResult.StandardOutput.Contains("Supported"))
+                {
+                    return true;
+                }
             }
 
-            // 正则没匹配到 → 检查系统中是否已有 Wi-Fi Direct 虚拟适配器
-            // 只要有这个适配器在,就说明驱动肯定是支持的,这比 netsh 文本解析更可靠
-            var hasVirtualAdapter = GetHostedNetworkAdapters().Count > 0;
-            if (hasVirtualAdapter)
-            {
-                return true;
-            }
-
-            // 最终兜底:返回 null——不确定
-            return null;
+            // ---- 两个检测都不支持 ----
+            // 若虚拟适配器存在但不支持 SoftAP → 说明是旧操作遗留,当前驱动已不支持
+            // 返回 false,不再用虚拟适配器兜底
+            return false;
         }
 
         /// <summary>
