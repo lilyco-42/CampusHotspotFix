@@ -68,6 +68,44 @@ if ($cap -eq 0) { Write-Host 'SUPPORTED' } else { Write-Host ('NOT:' + $cap) }
         }
 
         /// <summary>
+        /// 获取移动热点的 SSID 和密码
+        /// </summary>
+        public (string Ssid, string Password) GetHotspotCredentials()
+        {
+            var script = @"
+$null = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]
+$profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
+$mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager]::CreateFromConnectionProfile($profile)
+$cfg = $mgr.GetCurrentAccessPointConfiguration()
+Write-Host $cfg.Ssid
+Write-Host $cfg.Passphrase
+";
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"")}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                };
+                using var proc = Process.Start(psi)!;
+                string output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit(5000);
+                var lines = output.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                if (lines.Length >= 2)
+                    return (lines[0], lines[1]);
+                return ("(未知)", "(未知)");
+            }
+            catch
+            {
+                return ("(获取失败)", "");
+            }
+        }
+
+        /// <summary>
         /// 打开 Windows 设置 → 移动热点 页面
         /// </summary>
         public static void OpenSettings()

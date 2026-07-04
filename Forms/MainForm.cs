@@ -393,7 +393,21 @@ namespace CampusHotspotFix.Forms
             else
             {
                 var pppoeGuid = Guid.Parse(pppoeAdapters[0].Id);
-                var virtualGuid = Guid.Parse(virtualAdapters[0].Id);
+
+                // 确定热点适配器: 如果移动热点在运行,选 UP 的那个(本地连接* 10)
+                Guid virtualGuid;
+                if (hotspotOk)
+                {
+                    var upAdapter = virtualAdapters.FirstOrDefault(a => a.IsUp);
+                    virtualGuid = Guid.Parse((upAdapter ?? virtualAdapters[0]).Id);
+                    // 显示移动热点的真实 SSID/密码
+                    var (mhSsid, mhPwd) = _mobileHotspotService.GetHotspotCredentials();
+                    SafeAppend($"[信息] Windows 移动热点: SSID=\"{mhSsid}\" 密码=\"{mhPwd}\"");
+                }
+                else
+                {
+                    virtualGuid = Guid.Parse(virtualAdapters[0].Id);
+                }
 
                 SafeAppend($"[信息] PPPoE 适配器 GUID: {pppoeGuid}");
                 SafeAppend($"[信息] 虚拟热点适配器 GUID: {virtualGuid}");
@@ -452,8 +466,16 @@ namespace CampusHotspotFix.Forms
                 SafeAppend("部分项目修复失败,请根据错误信息排查。");
             }
 
-            SafeAppend($"热点名称: {ssid}");
-            SafeAppend($"热点密码: {key}");
+            if (hotspotOk && _mobileHotspotService.IsHotspotRunning())
+            {
+                var (mhSsid, mhPwd) = _mobileHotspotService.GetHotspotCredentials();
+                SafeAppend($"Windows 移动热点 SSID: \"{mhSsid}\"  密码: \"{mhPwd}\"");
+            }
+            else
+            {
+                SafeAppend($"netsh 热点名称: {ssid}");
+                SafeAppend($"netsh 热点密码: {key}");
+            }
         }
 
         // ---- UI 辅助 ----
