@@ -23,12 +23,7 @@
     <!-- Windows任务计划程序封装(David Hall的开源库),用于注册开机自动修复任务 -->
     <PackageReference Include="TaskScheduler" Version="2.10.1" />
 
-    <!--
-      重要:.NET Core/5+默认不再内置GBK(codepage 936)等旧版编码支持。
-      中文Windows下netsh/powercfg等命令行工具的输出默认是GBK编码,
-      不加这个包,解析中文输出(比如"支持的承载网络")会全部变成乱码,导致关键字匹配失败。
-    -->
-    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <!-- .NET 10 已内置 CodePages 编码支持 -->
   </ItemGroup>
 
   <ItemGroup>
