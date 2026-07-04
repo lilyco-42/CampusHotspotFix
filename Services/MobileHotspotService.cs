@@ -3,10 +3,7 @@ using System.Diagnostics;
 namespace CampusHotspotFix.Services
 {
     /// <summary>
-    /// Windows 移动热点服务。
-    /// 方法:
-    ///   1. 自动: 通过 PowerShell 调用 WinRT API 尝试开启
-    ///   2. 手动: 启动 ms-settings:network-mobilehotspot 设置页面
+    /// Windows 移动热点服务
     /// </summary>
     public class MobileHotspotService
     {
@@ -20,37 +17,17 @@ $null = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Win
 $profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
 $mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager]::CreateFromConnectionProfile($profile)
 $asyncOp = $mgr.StartTetheringAsync()
-$asyncOp.AsTask().GetAwaiter().GetResult()
+# Wait for async operation to complete
+while ($asyncOp.Status -eq 3) { Start-Sleep -Milliseconds 200 }
+$result = $asyncOp.GetResults()
+[int]$status = $result.Status
+if ($status -eq 0) { Write-Host 'OK' } else { Write-Host ('FAIL:' + $status) }
 ";
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"")}\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psi)!;
-                string output = proc.StandardOutput.ReadToEnd();
-                string error = proc.StandardError.ReadToEnd();
-                proc.WaitForExit(15000);
-
-                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
-                    return (true, "移动热点已开启");
-                else
-                    return (false, $"PowerShell 启动失败: {error.Trim()}");
-            }
-            catch (Exception ex)
-            {
-                return (false, $"异常: {ex.Message}");
-            }
+            return RunPowerShell(script, "OK", "移动热点已开启", "启动移动热点失败");
         }
 
         /// <summary>
-        /// 检测移动热点是否已开启(通过 PowerShell)
+        /// 检测移动热点是否已开启
         /// </summary>
         public bool IsHotspotRunning()
         {
@@ -58,27 +35,15 @@ $asyncOp.AsTask().GetAwaiter().GetResult()
 $null = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]
 $profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
 $mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager]::CreateFromConnectionProfile($profile)
-if ($mgr.TetheringOperationalState -eq 1) { Write-Host 'ON' }
+[int]$state = $mgr.TetheringOperationalState
+if ($state -eq 1) { Write-Host 'ON' } else { Write-Host 'OFF' }
 ";
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"")}\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psi)!;
-                string output = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit(5000);
+                var output = RunPowerShellRaw(script);
                 return output.Trim().Equals("ON", StringComparison.OrdinalIgnoreCase);
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         /// <summary>
@@ -90,44 +55,68 @@ if ($mgr.TetheringOperationalState -eq 1) { Write-Host 'ON' }
 $null = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]
 $profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
 $mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager]::CreateFromConnectionProfile($profile)
-$cap = $mgr.TetheringCapability
-if ($cap -eq 0) { Write-Host 'SUPPORTED' }
+[int]$cap = $mgr.TetheringCapability
+# 0 = Enabled (TetheringCapability.Enabled)
+if ($cap -eq 0) { Write-Host 'SUPPORTED' } else { Write-Host ('NOT:' + $cap) }
 ";
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"")}\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psi)!;
-                string output = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit(5000);
+                var output = RunPowerShellRaw(script);
                 return output.Trim().Equals("SUPPORTED", StringComparison.OrdinalIgnoreCase);
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         /// <summary>
-        /// 打开 Windows 设置 → 移动热点 页面(引导用户手动开启)
+        /// 打开 Windows 设置 → 移动热点 页面
         /// </summary>
         public static void OpenSettings()
         {
+            try { Process.Start(new ProcessStartInfo { FileName = "ms-settings:network-mobilehotspot", UseShellExecute = true }); }
+            catch { }
+        }
+
+        // ---- 辅助方法 ----
+
+        private (bool Success, string Message) RunPowerShell(string script, string successMarker, string successMsg, string failPrefix)
+        {
             try
             {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "ms-settings:network-mobilehotspot",
-                    UseShellExecute = true,
-                });
+                var (output, error) = RunPowerShellWithError(script);
+                if (output.Trim().Contains(successMarker))
+                    return (true, successMsg);
+                return (false, $"{failPrefix}: {(string.IsNullOrWhiteSpace(error) ? output.Trim() : error.Trim())}");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                return (false, $"异常: {ex.Message}");
+            }
+        }
+
+        private string RunPowerShellRaw(string script)
+        {
+            var (output, _) = RunPowerShellWithError(script);
+            return output;
+        }
+
+        private (string Stdout, string Stderr) RunPowerShellWithError(string script)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -Command \"{script.Replace("\"", "\\\"")}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+            };
+            using var proc = Process.Start(psi)!;
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit(15000);
+            return (stdout, stderr);
         }
     }
 }
