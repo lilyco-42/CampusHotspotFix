@@ -1,5 +1,6 @@
 using CampusHotspotFix.Models;
 using CampusHotspotFix.Services;
+using CampusHotspotFix.Utils;
 
 namespace CampusHotspotFix.Forms
 {
@@ -113,6 +114,17 @@ namespace CampusHotspotFix.Forms
             _stopButton.Click += (_, _) => _fixCts?.Cancel();
             Controls.Add(_stopButton);
 
+            var diagHotspotButton = new Button
+            {
+                Text = "📡 诊断热点",
+                BackColor = Color.FromArgb(0xFF, 0xF3, 0xE0),
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+            };
+            diagHotspotButton.SetBounds(465, 145, 120, 38);
+            diagHotspotButton.Click += OnDiagHotspotClicked;
+            Controls.Add(diagHotspotButton);
+
             // ---- 输出区域 ----
             _outputBox = new TextBox
             {
@@ -128,6 +140,115 @@ namespace CampusHotspotFix.Forms
 
             AppendOutput("校园宽带热点修复工具 v1.0 (MVP)\r\n");
             AppendOutput("点击「诊断网络状态」检测系统状态, 或直接点击「一键修复」自动修复。\r\n");
+        }
+
+        // ---- 热点诊断 ----
+
+        private async void OnDiagHotspotClicked(object? sender, EventArgs e)
+        {
+            SetStatus("诊断热点...", Color.FromArgb(0xFF, 0x8C, 0x00));
+            AppendOutput("========== 热点诊断 ==========");
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    // 1. 检查移动热点状态
+                    SafeAppend("[1/8] Windows 移动热点...");
+                    bool supported = _mobileHotspotService.IsHotspotSupported();
+                    bool running = _mobileHotspotService.IsHotspotRunning();
+                    if (running)
+                    {
+                        var (ssid, pwd) = _mobileHotspotService.GetHotspotCredentials();
+                        SafeAppend($"  状态: 已开启 | SSID: \"{ssid}\" 密码: \"{pwd}\"");
+                    }
+                    else if (supported)
+                    {
+                        SafeAppend($"  状态: 未开启 (硬件支持)");
+                    }
+                    else
+                    {
+                        SafeAppend($"  状态: 不支持");
+                    }
+
+                    // 2. 虚拟适配器状态
+                    SafeAppend("[2/8] 虚拟适配器...");
+                    var adapters = _adapterService.GetAllAdapters()
+                        .Where(a => a.IsHostedNetworkVirtualAdapter).ToList();
+                    foreach (var a in adapters)
+                    {
+                        SafeAppend($"  {(a.IsUp ? "🟢" : "⚪")} {a.Name} | {a.Description}");
+                        var cmd = CommandRunner.Run("netsh", $"interface ip show addresses \"{a.Name}\"");
+                        foreach (var line in cmd.StandardOutput.Split('\n', StringSplitOptions.TrimEntries))
+                        {
+                            if (line.Contains("IP") || line.Contains("DHCP") || line.Contains("默认"))
+                                SafeAppend($"    {line}");
+                        }
+                    }
+
+                    // 3. ICS DHCP 状态
+                    SafeAppend("[3/8] ICS DHCP 服务器...");
+                    var dhcpResult = CommandRunner.Run("netsh", "dhcp show server");
+                    SafeAppend(dhcpResult.ProcessExitedNormally
+                        ? $"  DHCP 服务器: {dhcpResult.StandardOutput.Trim()}"
+                        : "  DHCP 状态: 服务未运行或无法查询");
+
+                    // 4. NAT 转发规则
+                    SafeAppend("[4/8] NAT 地址转换...");
+                    var natResult = CommandRunner.Run("netsh", "routing ip nat show interface");
+                    if (natResult.ProcessExitedNormally && !string.IsNullOrWhiteSpace(natResult.StandardOutput))
+                    {
+                        foreach (var line in natResult.StandardOutput.Split('\n'))
+                            if (!string.IsNullOrWhiteSpace(line.Trim()))
+                                SafeAppend($"  {line.Trim()}");
+                    }
+                    else
+                    {
+                        SafeAppend("  NAT 未配置或路由服务未启动");
+                    }
+
+                    // 5. 防火墙 ICS 规则
+                    SafeAppend("[5/8] 防火墙 ICS 规则...");
+                    var fwResult = CommandRunner.Run("netsh", "advfirewall firewall show rule name=all dir=in | findstr /i \"ICS\\|Internet\\|共享\"");
+                    SafeAppend($"  {fwResult.StandardOutput.Trim()}");
+                    var fwResult2 = CommandRunner.Run("netsh", "advfirewall firewall show rule name=all dir=out | findstr /i \"ICS\\|Internet\\|共享\"");
+                    SafeAppend($"  {fwResult2.StandardOutput.Trim()}");
+
+                    // 6. WLAN 事件日志
+                    SafeAppend("[6/8] WLAN 最近事件...");
+                    var logResult = CommandRunner.Run("powershell",
+                        "-NoProfile -Command \"Get-WinEvent -LogName 'Microsoft-Windows-WLAN-AutoConfig/Operational' -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object { $_.LevelDisplayName -in 'Error','Warning' } | Format-Table TimeCreated,Id,Message -Wrap\"");
+                    if (!string.IsNullOrWhiteSpace(logResult.StandardOutput))
+                        SafeAppend($"  {logResult.StandardOutput.Trim()}");
+                    else
+                        SafeAppend("  无错误/警告事件");
+
+                    // 7. ICS 注册表状态
+                    SafeAppend("[7/8] ICS 共享配置...");
+                    var adapterList = _adapterService.GetAllAdapters();
+                    foreach (var a in adapterList.Where(x => x.IsUp))
+                    {
+                        // 检查是否有 ICS 网段 IP
+                        var ipResult = CommandRunner.Run("powershell",
+                            $"-NoProfile -Command \"Get-NetIPAddress -InterfaceAlias '{a.Name}' -ErrorAction SilentlyContinue | Where-Object IPAddress -like '192.168.*' | Select-Object -ExpandProperty IPAddress\"");
+                        if (!string.IsNullOrWhiteSpace(ipResult.StandardOutput.Trim()))
+                            SafeAppend($"  🟢 {a.Name} → ICS IP: {ipResult.StandardOutput.Trim()}");
+                    }
+
+                    // 8. 总体判断
+                    SafeAppend("[8/8] 诊断结论...");
+                    SafeAppend("  手机卡在'正在连接'通常是以下原因:");
+                    SafeAppend("  · 热点密码输入错误 — 以上方显示的真实密码为准");
+                    SafeAppend("  · Wi-Fi 6E 驱动兼容性 — Win11 Dev 版已知问题");
+                    SafeAppend("  · 多虚拟适配器冲突 — 禁用多余的(* 9)保留(* 10)");
+                }
+                catch (Exception ex)
+                {
+                    SafeAppend($"[错误] 诊断异常: {ex.Message}");
+                }
+            });
+
+            SetStatus("诊断完成", Color.Gray);
         }
 
         // ---- 诊断 ----
