@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 必须带 -windows 后缀,否则拿不到WinForms/WMI/COM互操作等Windows专属API -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- 应用清单,声明需要管理员权限运行 -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- 打包相关:发布时用 dotnet publish 加对应参数生成单文件exe -->
+    <AssemblyName>CampusHotspotFix</AssemblyName>
+    <RootNamespace>CampusHotspotFix</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WMI访问:查询网卡信息、电源管理属性等 -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+
+    <!-- Windows任务计划程序封装(David Hall的开源库),用于注册开机自动修复任务 -->
+    <PackageReference Include="TaskScheduler" Version="2.10.1" />
+
+    <!--
+      重要:.NET Core/5+默认不再内置GBK(codepage 936)等旧版编码支持。
+      中文Windows下netsh/powercfg等命令行工具的输出默认是GBK编码,
+      不加这个包,解析中文输出(比如"支持的承载网络")会全部变成乱码,导致关键字匹配失败。
+    -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- FAQ静态内容,随程序一起发布,运行时可读取 -->
+    <None Update="Resources\faq.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
