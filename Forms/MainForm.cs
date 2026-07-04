@@ -159,18 +159,46 @@ namespace CampusHotspotFix.Forms
             {
                 true => "✅ 支持承载网络",
                 false => "❌ 不支持承载网络",
-                null => "⚠️ 无法确定(请查看原始输出)",
+                null => "⚠️ 无法确定(请查看原始 netsh 输出)",
             };
             SafeAppend($"[P1] 驱动检测: {supportText}");
 
-            // 2. 枚举所有适配器
-            var adapters = _adapterService.GetAllAdapters();
-            SafeAppend($"[信息] 共检测到 {adapters.Count} 个网络适配器");
+            // 如果正则未匹配到,显示 raw netsh 输出片段供排查
+            if (supported == null && !string.IsNullOrWhiteSpace(rawDriver))
+            {
+                SafeAppend("── netsh wlan show drivers 关键片段 ──");
+                // 取包含 "Hosted"、"承载"、"Virtual"、"支持" 的行
+                foreach (var line in rawDriver.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.Contains("Hosted", StringComparison.OrdinalIgnoreCase) ||
+                        trimmed.Contains("承载", StringComparison.OrdinalIgnoreCase) ||
+                        trimmed.Contains("Virtual", StringComparison.OrdinalIgnoreCase) ||
+                        trimmed.Contains("支持", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SafeAppend($"  {trimmed}");
+                    }
+                }
+                SafeAppend("─────────────────────────");
+            }
 
-            foreach (var a in adapters)
+            // 2. 枚举真实适配器(已过滤 NDIS 过滤器等噪音)
+            var realAdapters = _adapterService.GetRealAdapters();
+            SafeAppend($"[信息] 真实网络接口共 {realAdapters.Count} 个:");
+
+            foreach (var a in realAdapters)
             {
                 string status = a.IsUp ? "🟢" : "⚪";
-                SafeAppend($"  {status} {a.Name} | {a.InterfaceType} | ID={a.Id}");
+                string tag = a.IsHostedNetworkVirtualAdapter ? "(虚拟热点)" : "";
+                SafeAppend($"  {status} {a.Name} {tag} | {a.InterfaceType}");
+            }
+
+            // 可选:显示全部适配器(含过滤器),但折叠
+            var allAdapters = _adapterService.GetAllAdapters(includeFilterDrivers: true);
+            int filterCount = allAdapters.Count - realAdapters.Count;
+            if (filterCount > 0)
+            {
+                SafeAppend($"  (已忽略 {filterCount} 个 NDIS 过滤器/协议驱动)");
             }
 
             // 3. 检测 PPPoE 拨号
@@ -181,7 +209,7 @@ namespace CampusHotspotFix.Forms
             }
             else
             {
-                SafeAppend($"[P2] ✅ 检测到 {pppoe.Count} 个拨号连接: {pppoe[0].Name}");
+                SafeAppend($"[P2] ✅ 检测到 {pppoe.Count} 个拨号连接: {pppoe[0].Name} | ID={pppoe[0].Id}");
             }
 
             // 4. 检测虚拟热点
@@ -192,16 +220,31 @@ namespace CampusHotspotFix.Forms
             }
             else
             {
-                SafeAppend($"[P1] ✅ 虚拟热点适配器已存在: {virtualAdapters[0].Name}");
+                SafeAppend($"[P1] ✅ 虚拟热点适配器已存在: {virtualAdapters[0].Name} | ID={virtualAdapters[0].Id}");
             }
 
             // 5. 检测热点状态
             var hotspot = _hostedNetworkService.QueryStatus();
             SafeAppend($"[P1] 热点状态: {hotspot.Status} | 已连接客户端: {hotspot.ConnectedClientCount}");
 
-            // 6. 检测 ICS 可用性
-            bool icsOk = _icsShareService.IsIcsAvailableOnSystem();
-            SafeAppend(icsOk ? "[P2] ✅ ICS 共享组件可用" : "[P2] ⚠️ ICS 共享组件不可用");
+            // 6. 检测 ICS 可用性 —— 带详细错误
+            try
+            {
+                bool icsOk = _icsShareService.IsIcsAvailableOnSystem();
+                SafeAppend(icsOk
+                    ? "[P2] ✅ ICS 共享组件可用"
+                    : "[P2] ⚠️ ICS 共享组件不可用");
+                if (!icsOk)
+                {
+                    SafeAppend("  原因: INetSharingManager COM 组件创建失败。常见原因:");
+                    SafeAppend("  - 系统为 Windows N/KN/LTSC 精简版");
+                    SafeAppend("  - hnetcfg.dll 未注册 (尝试: regsvr32 hnetcfg.dll)");
+                }
+            }
+            catch (Exception ex)
+            {
+                SafeAppend($"[P2] ⚠️ ICS 检测异常: {ex.GetType().Name}: {ex.Message}");
+            }
 
             // 7. 电源计划
             SafeAppend("[P5] 电源管理配置将在「一键修复」时自动处理");

@@ -12,18 +12,49 @@ namespace CampusHotspotFix.Services
     public class NetworkAdapterService
     {
         /// <summary>
-        /// 枚举所有网络接口(以太网、WLAN、PPPoE拨号等)。
-        /// 用托管API(NetworkInterface)而不是WMI/COM,理由见AdapterInfo.cs里的注释。
+        /// 过滤掉 NDIS 过滤器、协议驱动等非真实网络接口。
+        /// 典型的需要过滤的名称模式:
+        ///   - WFP Native MAC Layer LightWeight Filter
+        ///   - QoS Packet Scheduler
+        ///   - Npcap Packet Driver
+        ///   - VirtualBox NDIS Light-Weight Filter
+        ///   - Huorong / 火绒 等杀毒软件网络驱动
+        ///   - 任何包含 "-0000" 尾缀的 (系统自动编号的过滤器实例)
         /// </summary>
-        public List<AdapterInfo> GetAllAdapters()
+        private static readonly string[] FilterDriverKeywords =
+        [
+            "LightWeight Filter",
+            "Light-Weight Filter",
+            "WFP",
+            "QoS Packet Scheduler",
+            "Npcap",
+            "NPCAP",
+            "VirtualBox",
+            "Huorong",
+            "NDIS Filter",
+            "VMware",
+            "-0000",
+        ];
+
+        /// <summary>
+        /// 枚举所有真实的网络接口(以太网、WLAN、PPPoE拨号等)。
+        /// 过滤掉 Loopback、Tunnel 以及各种 NDIS 过滤器/协议驱动。
+        /// </summary>
+        public List<AdapterInfo> GetAllAdapters(bool includeFilterDrivers = false)
         {
             var result = new List<AdapterInfo>();
 
             foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
             {
-                // Loopback、Tunnel等系统内部接口对我们的场景没有意义,过滤掉,减少诊断报告里的噪音
+                // Loopback、Tunnel等系统内部接口对我们的场景没有意义
                 if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback
                     or NetworkInterfaceType.Tunnel)
+                {
+                    continue;
+                }
+
+                // 过滤 NDIS 过滤器、协议驱动等非真实网络接口
+                if (!includeFilterDrivers && IsFilterDriver(nic.Name, nic.Description))
                 {
                     continue;
                 }
@@ -42,9 +73,21 @@ namespace CampusHotspotFix.Services
             return result;
         }
 
+        private static bool IsFilterDriver(string name, string description)
+        {
+            foreach (var keyword in FilterDriverKeywords)
+            {
+                if (name.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
+                    description.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /// <summary>
         /// 找到当前的拨号连接(PPPoE)。NetworkInterfaceType.Ppp覆盖了PPPoE场景。
-        /// 如果返回空列表,说明当前没有激活的拨号连接——诊断报告需要明确提示用户先完成拨号。
         /// </summary>
         public List<AdapterInfo> GetDialupAdapters()
         {
@@ -54,9 +97,8 @@ namespace CampusHotspotFix.Services
         }
 
         /// <summary>
-        /// 找到"netsh wlan set hostednetwork"创建出来的虚拟热点适配器。
-        /// 这个适配器只有在HostedNetworkService.Enable()执行过之后才会出现,
-        /// 所以调用方要注意:开热点之前调这个方法,大概率是空列表,这是正常现象,不是bug。
+        /// 找到虚拟热点适配器。
+        /// 注意:开热点之前调这个方法大概率是空列表(适配器还未创建)。
         /// </summary>
         public List<AdapterInfo> GetHostedNetworkAdapters()
         {
@@ -67,23 +109,16 @@ namespace CampusHotspotFix.Services
 
         private static bool IsHostedNetworkAdapterName(string description)
         {
-            // 微软虚拟WiFi适配器的描述文本在不同Windows版本上略有差异,
-            // 用包含关键字的方式匹配,比要求完全相等更稳健
             return description.Contains("Virtual WiFi", StringComparison.OrdinalIgnoreCase)
                 || description.Contains("Wi-Fi Direct Virtual Adapter", StringComparison.OrdinalIgnoreCase)
                 || description.Contains("Microsoft Hosted Network Virtual Adapter", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
-        /// 检测网卡驱动是否支持"承载网络"(Hosted Network)。
-        /// 对应PRD里P1的前置判断——如果驱动本身不支持,后面所有基于hostednetwork命令的
-        /// 修复动作都注定失败,必须在这一步就拦住,给用户"换驱动/换外置USB无线网卡"的建议,
-        /// 而不是让流程继续走下去然后在后面某个环节报一个让人看不懂的错误。
+        /// 检测网卡驱动是否支持承载网络(Hosted Network)。
+        /// 先用 netsh 正则匹配,如果匹配不到但系统中已经存在虚拟热点适配器,
+        /// 说明硬件肯定是支持的,直接返回 true 作为兜底。
         /// </summary>
-        /// <returns>
-        /// true = 支持;false = 不支持;null = 命令执行失败,没能获取到明确结论
-        /// (比如超时、netsh输出格式在某个Windows版本上发生了变化导致关键字匹配不到)
-        /// </returns>
         public bool? IsHostedNetworkSupported(out string rawOutput)
         {
             var result = CommandRunner.Run("netsh", "wlan show drivers");
@@ -94,22 +129,39 @@ namespace CampusHotspotFix.Services
                 return null;
             }
 
-            // 中文Windows输出关键字是"支持的承载网络"，后面跟"是"或"否"
-            // 同时兼容可能的英文系统环境:"Hosted network supported"
+            // 尝试正则匹配 —— 兼容中英文
             var match = Regex.Match(
                 result.StandardOutput,
-                @"(支持的承载网络|Hosted network supported)\s*[:：]\s*(是|Yes|否|No)",
+                @"(支持的承载网络|Hosted network supported|支持托管网络)\s*[:：]?\s*(是|Yes|否|No|True|False)",
                 RegexOptions.IgnoreCase);
 
-            if (!match.Success)
+            if (match.Success)
             {
-                // 匹配不到,说明netsh输出格式和预期不一致(可能是系统语言、netsh版本差异),
-                // 明确返回null而不是猜测,让上层诊断报告如实反映"无法确定",而不是显示误导性的结论
-                return null;
+                var value = match.Groups[2].Value;
+                return value is "是" or "Yes" or "True";
             }
 
-            var value = match.Groups[2].Value;
-            return value is "是" or "Yes";
+            // 正则没匹配到 → 检查系统中是否已有 Wi-Fi Direct 虚拟适配器
+            // 只要有这个适配器在,就说明驱动肯定是支持的,这比 netsh 文本解析更可靠
+            var hasVirtualAdapter = GetHostedNetworkAdapters().Count > 0;
+            if (hasVirtualAdapter)
+            {
+                return true;
+            }
+
+            // 最终兜底:返回 null——不确定
+            return null;
+        }
+
+        /// <summary>
+        /// 简化版诊断输出(只显示真正的物理/虚拟网络接口和拨号连接)
+        /// </summary>
+        public List<AdapterInfo> GetRealAdapters()
+        {
+            return GetAllAdapters(includeFilterDrivers: false)
+                .Where(a => a.InterfaceType is "Ethernet" or "Wireless80211" or "Ppp"
+                            || a.IsHostedNetworkVirtualAdapter)
+                .ToList();
         }
     }
 }
