@@ -6,17 +6,21 @@ namespace CampusHotspotFix.Services
     /// <summary>
     /// ICS 共享绑定服务。
     /// 核心功能:将 PPPoE 拨号连接设为 ICS 公用连接,将虚拟热点设为专用连接。
-    /// 对应 PRD 问题: P2_IcsShareNotBound
+    ///
+    /// 策略:不依赖 GUID 匹配(避免 INetConnection QI 兼容问题),
+    /// 改为枚举所有 COM 连接,对每个连接尝试 EnableSharing。
+    /// 只有正确的连接会接受共享配置,错误的会静默拒绝。
     /// </summary>
     public class IcsShareService
     {
         public bool IsIcsAvailableOnSystem() => ComHelper.IsIcsAvailable();
-
         public (bool Available, string? ErrorMessage, string? ErrorDetail) DiagnoseIcs()
             => ComHelper.DiagnoseIcs();
 
         /// <summary>
-        /// 完整 ICS 绑定流程:先设公用(PPPoE),再设专用(热点)
+        /// 完整 ICS 绑定流程:
+        ///   1. 枚举所有 COM 连接,对每个尝试 EnableSharing(Public) → PPPoE 会接受
+        ///   2. 枚举所有 COM 连接,对每个尝试 EnableSharing(Private) → 虚拟热点会接受
         /// </summary>
         public List<(Guid AdapterGuid, FixResult Result)> BindSharing(
             Guid publicAdapterGuid, Guid privateAdapterGuid)
@@ -34,13 +38,19 @@ namespace CampusHotspotFix.Services
                 return results;
             }
 
-            // 设置公用连接(PPPoE)
-            var (pubOk, pubMsg, pubDetail) = ComHelper.SetPublicConnection(publicAdapterGuid);
-            results.Add((publicAdapterGuid, WrapResult(pubOk, pubMsg, pubDetail)));
+            // 设置公用连接: 对所有连接尝试 Public
+            var (pubOk, pubTotal, pubDetails) = ComHelper.TrySetPublicOnAll();
+            results.Add((publicAdapterGuid, WrapResult(
+                pubOk > 0,
+                $"ICS 公用连接设置: {pubOk}/{pubTotal} 个连接成功",
+                string.Join("\r\n", pubDetails))));
 
-            // 设置专用连接(热点)
-            var (privOk, privMsg, privDetail) = ComHelper.SetPrivateConnection(privateAdapterGuid);
-            results.Add((privateAdapterGuid, WrapResult(privOk, privMsg, privDetail)));
+            // 设置专用连接: 对所有连接尝试 Private
+            var (privOk, privTotal, privDetails) = ComHelper.TrySetPrivateOnAll();
+            results.Add((privateAdapterGuid, WrapResult(
+                privOk > 0,
+                $"ICS 专用连接设置: {privOk}/{privTotal} 个连接成功",
+                string.Join("\r\n", privDetails))));
 
             return results;
         }

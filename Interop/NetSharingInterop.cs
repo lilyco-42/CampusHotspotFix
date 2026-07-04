@@ -4,46 +4,12 @@ namespace CampusHotspotFix.Interop
 {
     // ============================================================
     // ICS (Internet Connection Sharing) COM 互操作
-    //
-    // 全部使用 dynamic 模式调用,避免 [ComImport] 接口定义
-    // 与当前系统 COM 接口 vtable 不匹配的问题。
-    //
     // CLSID: Windows 11 Build 26200 实测
+    //
+    // 策略: INetSharingManager 用 dynamic (IDispatch 双接口)
+    //       连接枚举和 GUID 匹配改为「对所有连接尝试 EnableSharing」
+    //       避免了 INetConnection QI 的兼容问题
     // ============================================================
-
-    // ============================================================
-    // INetConnection — IUnknown 接口, vtable 稳定
-    // 用于 QI 后读取连接属性(GUID),从而匹配 AdapterInfo.Id
-    // ============================================================
-
-    /// <summary>NETCON_PROPERTIES 结构体</summary>
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    internal struct NetConProperties
-    {
-        public Guid GuidId;
-        [MarshalAs(UnmanagedType.LPWStr)] public string Name;
-        [MarshalAs(UnmanagedType.LPWStr)] public string DeviceName;
-        public int Status;
-        public int MediaType;
-        public int Characteristics;
-        public Guid ClsidThisObject;
-        public Guid ClsidUiObject;
-        [MarshalAs(UnmanagedType.LPWStr)] public string Description;
-    }
-
-    /// <summary>
-    /// INetConnection — IUnknown 接口,稳定 vtable
-    /// 来自 Windows SDK netcon.h (GUID 自 Windows 2000 以来未变)
-    /// </summary>
-    [ComImport]
-    [Guid("C08956A0-1CD3-11D1-B1C5-00805FC1270E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    internal interface INetConnection
-    {
-        [PreserveSig] int Connect();
-        [PreserveSig] int Disconnect();
-        [PreserveSig] int GetProperties(out IntPtr ppProps);
-    }
 
     internal enum SharingConnectionType
     {
@@ -54,159 +20,98 @@ namespace CampusHotspotFix.Interop
     internal static class ComHelper
     {
         private static readonly Guid ClsidNetSharingMgr = new("5C63C1AD-3956-4FF8-8486-40034758315B");
-        private static readonly Guid IidNetConnection = typeof(INetConnection).GUID;
         private static Type? _mgrType;
 
         private static Type MgrType =>
             _mgrType ??= Type.GetTypeFromCLSID(ClsidNetSharingMgr)
                 ?? throw new InvalidOperationException($"NetSharingManager CLSID {ClsidNetSharingMgr} 不可用");
 
-        private static dynamic CreateManager() => Activator.CreateInstance(MgrType)!;
+        private static dynamic CreateManager()
+        {
+            var mgr = Activator.CreateInstance(MgrType);
+            return mgr!;
+        }
 
-        // ---- 公开 API ----
+        // ==================== 公开 API ====================
 
         internal static bool IsIcsAvailable()
         {
-            try
-            {
-                dynamic mgr = CreateManager();
-                return (bool)mgr.SharingInstalled;
-            }
-            catch
-            {
-                return false;
-            }
+            try { return (bool)CreateManager().SharingInstalled; }
+            catch { return false; }
         }
 
         internal static (bool Available, string? ErrorMessage, string? ErrorDetail) DiagnoseIcs()
         {
             try
             {
-                dynamic mgr = CreateManager();
-                bool installed = (bool)mgr.SharingInstalled;
+                bool installed = (bool)CreateManager().SharingInstalled;
                 return (installed, null, null);
             }
-            catch (Exception ex)
-            {
-                return (false, $"{ex.GetType().Name}: {ex.Message}", ex.ToString());
-            }
+            catch (Exception ex) { return (false, $"{ex.GetType().Name}: {ex.Message}", ex.ToString()); }
         }
 
         /// <summary>
-        /// 枚举所有连接,通过 QI → INetConnection.GetProperties()
-        /// 读取 GUID,匹配后返回其 INetSharingConfiguration
+        /// 枚举所有 COM 连接,对每个连接尝试 EnableSharing(Public)。
+        /// 返回(成功数, 总数, 详情列表)
         /// </summary>
-        internal static dynamic? GetConfigForAdapterGuid(Guid targetGuid)
+        internal static (int Succeeded, int Total, List<string> Details) TrySetPublicOnAll()
         {
-            if (!IsIcsAvailable())
-                return null;
+            return TrySetSharingOnAll(SharingConnectionType.Public);
+        }
 
-            dynamic mgr = CreateManager();
-            dynamic collection = mgr.EnumEveryConnection;
-            int count = (int)collection.Count;
+        /// <summary>
+        /// 枚举所有 COM 连接,对每个连接尝试 EnableSharing(Private)。
+        /// </summary>
+        internal static (int Succeeded, int Total, List<string> Details) TrySetPrivateOnAll()
+        {
+            return TrySetSharingOnAll(SharingConnectionType.Private);
+        }
 
-            for (int i = 1; i <= count; i++)
+        /// <summary>
+        /// 对每个连接尝试设置指定类型的共享 —— 不依赖 GUID 匹配。
+        /// </summary>
+        private static (int Succeeded, int Total, List<string> Details) TrySetSharingOnAll(SharingConnectionType type)
+        {
+            var details = new List<string>();
+            int succeeded = 0, total = 0;
+
+            try
             {
-                try
-                {
-                    dynamic rawConn = collection.Item(i);
-                    if (rawConn == null) continue;
+                dynamic mgr = CreateManager();
+                dynamic collection = mgr.EnumEveryConnection;
+                int count = (int)collection.Count;
+                details.Add($"共 {count} 个连接");
 
-                    // QI: rawConn (IUnknown) → INetConnection
-                    IntPtr pUnk = Marshal.GetIUnknownForObject(rawConn);
+                for (int i = 1; i <= count; i++)
+                {
+                    total++;
                     try
                     {
-                        int hr = Marshal.QueryInterface(pUnk, in IidNetConnection, out IntPtr pConn);
-                        if (hr != 0) continue;
-
-                        try
+                        object? rawConn = collection.Item(i);
+                        if (rawConn == null)
                         {
-                            var netConn = Marshal.GetObjectForIUnknown(pConn) as INetConnection;
-                            if (netConn == null) continue;
-
-                            hr = netConn.GetProperties(out IntPtr pProps);
-                            if (hr != 0 || pProps == IntPtr.Zero) continue;
-
-                            try
-                            {
-                                var props = Marshal.PtrToStructure<NetConProperties>(pProps);
-                                if (props.GuidId == targetGuid)
-                                {
-                                    return mgr.INetSharingConfigurationForINetConnection(rawConn);
-                                }
-                            }
-                            finally
-                            {
-                                Marshal.FreeCoTaskMem(pProps);
-                            }
+                            details.Add($"[{i}] null");
+                            continue;
                         }
-                        finally
-                        {
-                            Marshal.Release(pConn);
-                        }
+
+                        details.Add($"[{i}] 尝试设置 {(type == SharingConnectionType.Public ? "Public" : "Private")}...");
+                        dynamic config = mgr.INetSharingConfigurationForINetConnection(rawConn);
+                        config.EnableSharing((int)type);
+                        succeeded++;
+                        details.Add($"[{i}] ✓ 成功");
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        Marshal.Release(pUnk);
+                        details.Add($"[{i}] ✗ {ex.GetType().Name}: {ex.Message}");
                     }
                 }
-                catch
-                {
-                    continue;
-                }
-            }
-
-            return null;
-        }
-
-        // ---- 业务方法 ----
-
-        internal static (bool Success, string Message, string? Detail) SetPublicConnection(Guid adapterGuid)
-        {
-            return SetSharing(adapterGuid, SharingConnectionType.Public);
-        }
-
-        internal static (bool Success, string Message, string? Detail) SetPrivateConnection(Guid adapterGuid)
-        {
-            return SetSharing(adapterGuid, SharingConnectionType.Private);
-        }
-
-        internal static (bool Success, string Message, string? Detail) DisableSharing(Guid adapterGuid)
-        {
-            try
-            {
-                dynamic? config = GetConfigForAdapterGuid(adapterGuid);
-                if (config == null)
-                    return (true, "适配器未配置 ICS 共享,无需清理", null);
-
-                config.DisableSharing();
-                return (true, $"已移除 ICS 共享配置", null);
             }
             catch (Exception ex)
             {
-                return (false, "移除 ICS 共享失败", $"{ex.GetType().Name}: {ex.Message}");
+                details.Add($"枚举连接集合失败: {ex.Message}");
             }
-        }
 
-        private static (bool Success, string Message, string? Detail) SetSharing(Guid adapterGuid, SharingConnectionType type)
-        {
-            try
-            {
-                dynamic? config = GetConfigForAdapterGuid(adapterGuid);
-                if (config == null)
-                    return (false, $"未找到适配器 [{adapterGuid}] 的 ICS 配置对象", null);
-
-                config.EnableSharing((int)type);
-                return (true, $"已设为 {(type == SharingConnectionType.Public ? "公用" : "专用")} 连接", null);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                return (false, "权限不足: 需要管理员权限", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return (false, $"设置 ICS 共享失败", $"{ex.GetType().Name}: {ex.Message}");
-            }
+            return (succeeded, total, details);
         }
     }
 }
