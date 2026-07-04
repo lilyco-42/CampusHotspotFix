@@ -23,7 +23,9 @@ obj/
 # CodeGraph
 .codegraph/
 
-# Omo run continuations
+# Tool auto-generated files
+CLAUDE.md
+docs/agents/
 .omo/
 
 # OS files
