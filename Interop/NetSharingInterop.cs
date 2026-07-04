@@ -2,19 +2,22 @@ using System.Runtime.InteropServices;
 
 namespace CampusHotspotFix.Interop
 {
-    // ============================================================
-    // ICS (Internet Connection Sharing) COM 互操作
-    // CLSID: Windows 11 Build 26200 实测
-    //
-    // 策略: INetSharingManager 用 dynamic (IDispatch 双接口)
-    //       连接枚举和 GUID 匹配改为「对所有连接尝试 EnableSharing」
-    //       避免了 INetConnection QI 的兼容问题
-    // ============================================================
-
     internal enum SharingConnectionType
     {
         Private = 0,
         Public = 1,
+    }
+
+    // IEnumVARIANT — 用于手动枚举 COM 集合
+    [ComImport]
+    [Guid("00020404-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IEnumVARIANT
+    {
+        [PreserveSig] int Next(int celt, IntPtr rgvar, out int pceltFetched);
+        [PreserveSig] int Skip(int celt);
+        [PreserveSig] int Reset();
+        [PreserveSig] int Clone(out IEnumVARIANT ppenum);
     }
 
     internal static class ComHelper
@@ -24,13 +27,10 @@ namespace CampusHotspotFix.Interop
 
         private static Type MgrType =>
             _mgrType ??= Type.GetTypeFromCLSID(ClsidNetSharingMgr)
-                ?? throw new InvalidOperationException($"NetSharingManager CLSID {ClsidNetSharingMgr} 不可用");
+                ?? throw new InvalidOperationException($"NetSharingManager CLSID 不可用");
 
         private static dynamic CreateManager()
-        {
-            var mgr = Activator.CreateInstance(MgrType);
-            return mgr!;
-        }
+            => Activator.CreateInstance(MgrType)!;
 
         // ==================== 公开 API ====================
 
@@ -42,39 +42,21 @@ namespace CampusHotspotFix.Interop
 
         internal static (bool Available, string? ErrorMessage, string? ErrorDetail) DiagnoseIcs()
         {
-            try
-            {
-                bool installed = (bool)CreateManager().SharingInstalled;
-                return (installed, null, null);
-            }
+            try { return ((bool)CreateManager().SharingInstalled, null, null); }
             catch (Exception ex) { return (false, $"{ex.GetType().Name}: {ex.Message}", ex.ToString()); }
         }
 
-        /// <summary>
-        /// 枚举所有 COM 连接,对每个连接尝试 EnableSharing(Public)。
-        /// 返回(成功数, 总数, 详情列表)
-        /// </summary>
         internal static (int Succeeded, int Total, List<string> Details) TrySetPublicOnAll()
-        {
-            return TrySetSharingOnAll(SharingConnectionType.Public);
-        }
+            => TrySetSharingOnAll(SharingConnectionType.Public);
 
-        /// <summary>
-        /// 枚举所有 COM 连接,对每个连接尝试 EnableSharing(Private)。
-        /// </summary>
         internal static (int Succeeded, int Total, List<string> Details) TrySetPrivateOnAll()
-        {
-            return TrySetSharingOnAll(SharingConnectionType.Private);
-        }
+            => TrySetSharingOnAll(SharingConnectionType.Private);
 
-        /// <summary>
-        /// 对每个连接尝试设置指定类型的共享。
-        /// 先试 Item(index), 不行就试 _NewEnum 手动枚举。
-        /// </summary>
         private static (int Succeeded, int Total, List<string> Details) TrySetSharingOnAll(SharingConnectionType type)
         {
             var details = new List<string>();
-            int succeeded = 0, total = 0;
+            int succeeded = 0;
+            var connections = new List<object>();
 
             try
             {
@@ -83,70 +65,23 @@ namespace CampusHotspotFix.Interop
                 int count = (int)collection.Count;
                 details.Add($"共 {count} 个连接");
 
-                // 收集所有原始连接对象
-                var connections = new List<object>();
-
-                // 方法1: 按索引访问 (Item/DISPID 0)
-                for (int i = 1; i <= count; i++)
-                {
-                    try
-                    {
-                        object? c = collection.Item(i);
-                        if (c != null) { connections.Add(c); continue; }
-                    }
-                    catch (Exception ex)
-                    {
-                        details.Add($"[Item#{i}] ✗ {ex.GetType().Name}: {ex.Message}");
-                    }
-
-                    // 方法2: 试 _NewEnum 方式 (略, 仅用方法1)
-                }
-
-                // 如果 Item 一个都没取到, 试 _NewEnum
-                if (connections.Count == 0)
-                {
-                    try
-                    {
-                        dynamic rawEnum = collection._NewEnum;
-                        details.Add($"_NewEnum 对象类型: {rawEnum?.GetType()}");
-                    }
-                    catch (Exception ex)
-                    {
-                        details.Add($"_NewEnum 也失败: {ex.Message}");
-                    }
-                }
-
-                total = connections.Count;
-                details.Add($"共获取到 {total} 个连接对象");
+                // 枚举: 通过 _NewEnum → IEnumVARIANT
+                connections = EnumConnectionsViaNewEnum(collection, details);
+                details.Add($"实际取到 {connections.Count} 个连接对象");
 
                 foreach (var rawConn in connections)
                 {
                     try
                     {
-                        string label = TryGetConnLabel(rawConn);
-                        details.Add($"[{label}] 尝试 {(type == SharingConnectionType.Public ? "Public" : "Private")}...");
-
+                        details.Add($"  尝试 {(type == SharingConnectionType.Public ? "Public" : "Private")}...");
                         dynamic config = mgr.INetSharingConfigurationForINetConnection(rawConn);
-
-                        // 检查当前状态
-                        bool alreadyEnabled;
-                        try { alreadyEnabled = (bool)config.SharingEnabled; }
-                        catch { alreadyEnabled = false; }
-
-                        if (alreadyEnabled)
-                        {
-                            details.Add($"[{label}] 已启用, 跳过");
-                            succeeded++;
-                            continue;
-                        }
-
                         config.EnableSharing((int)type);
                         succeeded++;
-                        details.Add($"[{label}] ✓ 成功");
+                        details.Add($"  ✓ 成功");
                     }
                     catch (Exception ex)
                     {
-                        details.Add($"[连接] ✗ {ex.GetType().Name}: {ex.Message}");
+                        details.Add($"  ✗ {ex.GetType().Name}: {ex.Message}");
                     }
                 }
             }
@@ -155,23 +90,110 @@ namespace CampusHotspotFix.Interop
                 details.Add($"枚举失败: {ex.Message}");
             }
 
-            return (succeeded, total, details);
+            return (succeeded, connections.Count, details);
         }
 
         /// <summary>
-        /// 尝试读取连接的友好名称(仅用于日志)
+        /// 通过 _NewEnum → IEnumVARIANT 枚举集合中的连接
         /// </summary>
-        private static string TryGetConnLabel(object rawConn)
+        private static List<object> EnumConnectionsViaNewEnum(dynamic collection, List<string> log)
         {
+            var result = new List<object>();
+
             try
             {
-                dynamic p = ((dynamic)rawConn).GetProperties();
-                return p.Name ?? "?";
+                object? newEnumObj;
+                try
+                {
+                    newEnumObj = collection._NewEnum;
+                }
+                catch (Exception ex)
+                {
+                    log.Add($"_NewEnum 不可用: {ex.Message}");
+                    return result;
+                }
+
+                if (newEnumObj == null)
+                {
+                    log.Add("_NewEnum 返回 null");
+                    return result;
+                }
+
+                // QI: _NewEnum (IUnknown) → IEnumVARIANT
+                IntPtr pUnk = Marshal.GetIUnknownForObject(newEnumObj);
+                try
+                {
+                    Guid iidEnumVariant = typeof(IEnumVARIANT).GUID;
+                    int hr = Marshal.QueryInterface(pUnk, in iidEnumVariant, out IntPtr pEnum);
+                    if (hr != 0)
+                    {
+                        log.Add($"QI IEnumVARIANT 失败 hr=0x{hr:X8}");
+                        return result;
+                    }
+
+                    try
+                    {
+                        var enumVar = Marshal.GetObjectForIUnknown(pEnum) as IEnumVARIANT;
+                        if (enumVar == null)
+                        {
+                            log.Add("IEnumVARIANT 转换失败");
+                            return result;
+                        }
+
+                        // 迭代
+                        const int batchSize = 1;
+                        while (true)
+                        {
+                            IntPtr variant = Marshal.AllocCoTaskMem(16); // VARIANT = 16 bytes
+                            try
+                            {
+                                int fetched;
+                                hr = enumVar.Next(batchSize, variant, out fetched);
+
+                                if (hr != 0 || fetched == 0)
+                                    break; // S_FALSE or error → 枚举结束
+
+                                object? obj = Marshal.GetObjectForNativeVariant(variant);
+                                if (obj != null)
+                                    result.Add(obj);
+                            }
+                            finally
+                            {
+                                // 清除 VARIANT (释放 BSTR 等)
+                                try { Marshal.DestroyStructure(variant, typeof(InnerVariant)); }
+                                catch { }
+                                Marshal.FreeCoTaskMem(variant);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.Release(pEnum);
+                    }
+                }
+                finally
+                {
+                    Marshal.Release(pUnk);
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                return "?";
+                log.Add($"枚举异常: {ex.Message}");
             }
+
+            return result;
+        }
+
+        // 仅供 DestroyStructure 使用的占位类型
+        [StructLayout(LayoutKind.Sequential)]
+        private struct InnerVariant
+        {
+            public ushort vt;
+            public ushort reserved1;
+            public ushort reserved2;
+            public ushort reserved3;
+            public IntPtr data1;
+            public IntPtr data2;
         }
     }
 }
