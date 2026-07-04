@@ -5,24 +5,36 @@ namespace CampusHotspotFix.Interop
     // ============================================================
     // ICS (Internet Connection Sharing) COM 互操作定义
     //
-    // 组件: hnetcfg.dll / NetSharingManager
+    // 重要:这些 GUID 是在 Windows 11 Build 26200 上实测得到的,
+    // 与 MSDN 上旧版本的 GUID **不同**。
+    // 如果要在其他 Windows 版本上使用,请先检查注册表中的实际 GUID。
     //
-    // 调用流程:
-    //   1. 实例化 NetSharingManager
-    //   2. EnumEveryConnection → 枚举所有连接
-    //   3. 按 GUID 匹配目标适配器
-    //   4. 获取 INetSharingConfiguration
-    //   5. EnableSharing(Public/Private) → 绑定 ICS
+    // 验证命令(管理员 PowerShell):
+    //   Get-ChildItem HKLM:\SOFTWARE\Classes\Interface |
+    //     Where-Object {$_.PSChildName -match 'C08956|33C4643C'}
     //
-    // 参考资料: Windows SDK netcfgn.h / netcon.h
+    // 组件: hnetcfg.dll (Home Networking Sharing Configuration Manager)
     // ============================================================
 
+    // ---- CLSID (组件类) ----
+
+    /// <summary>
+    /// NetSharingManager COM 类 CLSID。
+    /// Windows 11 Build 26200 实测 ID。
+    /// </summary>
     [ComImport]
-    [Guid("C1A400A4-3E45-11D2-A870-00C04FB990A2")]
+    [Guid("5C63C1AD-3956-4FF8-8486-40034758315B")]
     internal class NetSharingManager { }
 
+
+    // ---- 主接口 ----
+
+    /// <summary>
+    /// INetSharingManager — ICS 共享管理器入口。
+    /// ProxyStub: OLE Automation (PSOAInterface)
+    /// </summary>
     [ComImport]
-    [Guid("C1A400A0-3E45-11D2-A870-00C04FB990A2")]
+    [Guid("C08956B7-1CD3-11D1-B1C5-00805FC1270E")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     internal interface INetSharingManager
     {
@@ -37,8 +49,12 @@ namespace CampusHotspotFix.Interop
         bool SharingInstalled { get; }
     }
 
+    /// <summary>
+    /// INetSharingEveryConnectionCollection — 连接集合。
+    /// ProxyStub: netshell.dll (PSFactoryBuffer)
+    /// </summary>
     [ComImport]
-    [Guid("E707C1E0-27C0-11D2-A8C0-00C04FB990A2")]
+    [Guid("33C4643C-7811-46FA-A89A-768597BD7223")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     internal interface INetSharingEveryConnectionCollection
     {
@@ -51,22 +67,25 @@ namespace CampusHotspotFix.Interop
     }
 
     /// <summary>
-    /// INetConnection — 网络连接 COM 接口
-    /// 用于获取连接 GUID 以匹配 AdapterInfo.Id
+    /// INetConnection — 网络连接 COM 接口。
+    /// 来自 netcon.h 标准定义。
     /// </summary>
     [ComImport]
     [Guid("C08956A0-1CD3-11D1-B1C5-00805FC1270E")]
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface INetConnection
     {
-        // 不用的方法定义为 PreserveSig 占位保持 vtable 顺序
         [PreserveSig] int Connect();
         [PreserveSig] int Disconnect();
         [PreserveSig] int GetProperties(out IntPtr ppProps);
     }
 
+    /// <summary>
+    /// INetSharingConfiguration — 单条连接的 ICS 共享配置。
+    /// ProxyStub: OLE Automation (PSOAInterface)
+    /// </summary>
     [ComImport]
-    [Guid("C5E8E7D0-2520-11D2-A8C4-00C04FB990A2")]
+    [Guid("C08956B6-1CD3-11D1-B1C5-00805FC1270E")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     internal interface INetSharingConfiguration
     {
@@ -83,15 +102,21 @@ namespace CampusHotspotFix.Interop
         void DisableSharing();
     }
 
+
+    // ---- 枚举 ----
+
     internal enum SharingConnectionType
     {
         Private = 0,  // 专用连接(接收共享的 LAN 侧)
         Public = 1,   // 公用连接(提供互联网的 WAN 侧)
     }
 
+
+    // ---- 结构体 ----
+
     /// <summary>
-    /// NETCON_PROPERTIES — 连接属性结构体
-    /// 必须保持字段顺序与 C 结构体完全一致
+    /// NETCON_PROPERTIES — 连接属性结构体。
+    /// 由 INetConnection.GetProperties() 返回,使用后需用 Marshal.FreeCoTaskMem 释放。
     /// </summary>
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct NetConProperties
@@ -107,11 +132,28 @@ namespace CampusHotspotFix.Interop
         [MarshalAs(UnmanagedType.LPWStr)] public string Description;
     }
 
-    /// <summary>
-    /// ComHelper — 简化 COM 枚举与属性读取
-    /// </summary>
+
+    // ---- 工具 ----
+
     internal static class ComHelper
     {
+        /// <summary>
+        /// 检查系统上 ICS 功能是否可用
+        /// </summary>
+        internal static bool IsIcsAvailable()
+        {
+            try
+            {
+                var mgr = (INetSharingManager)new NetSharingManager();
+                return mgr.SharingInstalled;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"ICS COM 创建失败: {ex.Message}");
+                return false;
+            }
+        }
+
         /// <summary>
         /// 获取指定 GUID 对应的 INetSharingConfiguration
         /// 返回 null 表示未找到匹配连接或目标不支持 ICS
@@ -135,7 +177,6 @@ namespace CampusHotspotFix.Interop
                     IntPtr pConn = Marshal.GetIUnknownForObject(rawConn);
                     try
                     {
-                        // QI for INetConnection
                         Guid iid = typeof(INetConnection).GUID;
                         int hr = Marshal.QueryInterface(pConn, in iid, out IntPtr pNetConn);
                         if (hr != 0) continue;
@@ -145,7 +186,6 @@ namespace CampusHotspotFix.Interop
 
                         if (netConn == null) continue;
 
-                        // 读取 GUID
                         IntPtr pProps = IntPtr.Zero;
                         try
                         {
@@ -176,19 +216,6 @@ namespace CampusHotspotFix.Interop
             }
 
             return null;
-        }
-
-        internal static bool IsIcsAvailable()
-        {
-            try
-            {
-                var mgr = (INetSharingManager)new NetSharingManager();
-                return mgr.SharingInstalled;
-            }
-            catch
-            {
-                return false;
-            }
         }
     }
 }
