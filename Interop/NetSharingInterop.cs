@@ -11,6 +11,40 @@ namespace CampusHotspotFix.Interop
     // CLSID: Windows 11 Build 26200 实测
     // ============================================================
 
+    // ============================================================
+    // INetConnection — IUnknown 接口, vtable 稳定
+    // 用于 QI 后读取连接属性(GUID),从而匹配 AdapterInfo.Id
+    // ============================================================
+
+    /// <summary>NETCON_PROPERTIES 结构体</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct NetConProperties
+    {
+        public Guid GuidId;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Name;
+        [MarshalAs(UnmanagedType.LPWStr)] public string DeviceName;
+        public int Status;
+        public int MediaType;
+        public int Characteristics;
+        public Guid ClsidThisObject;
+        public Guid ClsidUiObject;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Description;
+    }
+
+    /// <summary>
+    /// INetConnection — IUnknown 接口,稳定 vtable
+    /// 来自 Windows SDK netcon.h (GUID 自 Windows 2000 以来未变)
+    /// </summary>
+    [ComImport]
+    [Guid("C08956A0-1CD3-11D1-B1C5-00805FC1270E")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface INetConnection
+    {
+        [PreserveSig] int Connect();
+        [PreserveSig] int Disconnect();
+        [PreserveSig] int GetProperties(out IntPtr ppProps);
+    }
+
     internal enum SharingConnectionType
     {
         Private = 0,
@@ -20,6 +54,7 @@ namespace CampusHotspotFix.Interop
     internal static class ComHelper
     {
         private static readonly Guid ClsidNetSharingMgr = new("5C63C1AD-3956-4FF8-8486-40034758315B");
+        private static readonly Guid IidNetConnection = typeof(INetConnection).GUID;
         private static Type? _mgrType;
 
         private static Type MgrType =>
@@ -58,7 +93,8 @@ namespace CampusHotspotFix.Interop
         }
 
         /// <summary>
-        /// 枚举所有连接,找到 GUID 匹配的那个,返回其 INetSharingConfiguration (dynamic)
+        /// 枚举所有连接,通过 QI → INetConnection.GetProperties()
+        /// 读取 GUID,匹配后返回其 INetSharingConfiguration
         /// </summary>
         internal static dynamic? GetConfigForAdapterGuid(Guid targetGuid)
         {
@@ -76,14 +112,42 @@ namespace CampusHotspotFix.Interop
                     dynamic rawConn = collection.Item(i);
                     if (rawConn == null) continue;
 
-                    // 每个连接对象支持 GetProperties() 返回属性对象
-                    // 属性对象包含 GuidId 字段
-                    dynamic props = rawConn.GetProperties();
-                    Guid guid = props.GuidId;
-
-                    if (guid == targetGuid)
+                    // QI: rawConn (IUnknown) → INetConnection
+                    IntPtr pUnk = Marshal.GetIUnknownForObject(rawConn);
+                    try
                     {
-                        return mgr.INetSharingConfigurationForINetConnection(rawConn);
+                        int hr = Marshal.QueryInterface(pUnk, in IidNetConnection, out IntPtr pConn);
+                        if (hr != 0) continue;
+
+                        try
+                        {
+                            var netConn = Marshal.GetObjectForIUnknown(pConn) as INetConnection;
+                            if (netConn == null) continue;
+
+                            hr = netConn.GetProperties(out IntPtr pProps);
+                            if (hr != 0 || pProps == IntPtr.Zero) continue;
+
+                            try
+                            {
+                                var props = Marshal.PtrToStructure<NetConProperties>(pProps);
+                                if (props.GuidId == targetGuid)
+                                {
+                                    return mgr.INetSharingConfigurationForINetConnection(rawConn);
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.FreeCoTaskMem(pProps);
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.Release(pConn);
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.Release(pUnk);
                     }
                 }
                 catch
