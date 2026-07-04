@@ -58,12 +58,18 @@ namespace CampusHotspotFix.Services
             var startOutput = startResult.StandardOutput;
             bool startOk = IsSuccessOutput(startOutput);
 
-            if (!startOk)
+            // 启动后验证: 查状态是否真正变为"已启动"
+            Thread.Sleep(1000); // 等1秒让状态更新
+            var verifyStatus = QueryStatus();
+
+            bool actuallyRunning = verifyStatus.Status == HostedNetworkStatus.Started;
+
+            if (!actuallyRunning)
             {
                 return FixResult.Fail(
                     ProblemCode.P1_HostedNetworkNotAvailable,
-                    "虚拟热点启动失败,常见原因是网卡驱动不支持承载网络,或WLAN服务未运行",
-                    detail: $"ExitCode={startResult.ExitCode}\r\nstdout:\r\n{startOutput}\r\nstderr:\r\n{startResult.StandardError}");
+                    "虚拟热点启动失败(启动后状态未变为已启动)",
+                    detail: $"ExitCode={startResult.ExitCode}\r\nstdout:\r\n{startOutput}\r\nstderr:\r\n{startResult.StandardError}\r\nverify:\r\n{verifyStatus.RawOutput}");
             }
 
             return FixResult.Ok(ProblemCode.P1_HostedNetworkNotAvailable, "虚拟热点已成功启动");
@@ -113,22 +119,22 @@ namespace CampusHotspotFix.Services
         /// </summary>
         private static bool IsSuccessOutput(string output)
         {
-            // 成功关键词
+            // 成功关键词 (注意: "The hosted network" 单独出现可能是错误信息)
             if (output.Contains("已成功", StringComparison.OrdinalIgnoreCase) ||
                 output.Contains("已启动", StringComparison.OrdinalIgnoreCase) ||
-                output.Contains("The hosted network started", StringComparison.OrdinalIgnoreCase) ||
-                output.Contains("The hosted network", StringComparison.OrdinalIgnoreCase))
+                output.Contains("The hosted network started", StringComparison.OrdinalIgnoreCase))
                 return true;
 
-            // 如果没有明确失败关键词就算成功(部分 Windows 版本 netsh 不输出明确成功消息)
-            var failKeywords = new[] { "失败", "错误", "error", "fail", "not supported", "is not" };
+            // 失败关键词
+            var failKeywords = new[] { "失败", "错误", "无法", "error", "fail", "not supported",
+                                       "is not", "couldn't", "can't", "not in the correct state" };
             foreach (var kw in failKeywords)
             {
                 if (output.Contains(kw, StringComparison.OrdinalIgnoreCase))
                     return false;
             }
 
-            // ExitCode==0 且非空输出 → 视为成功
+            // ExitCode==0 且非空输出 → 视为成功 (仅对 set 命令有效)
             return !string.IsNullOrWhiteSpace(output);
         }
     }

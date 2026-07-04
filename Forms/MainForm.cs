@@ -307,16 +307,17 @@ namespace CampusHotspotFix.Forms
         {
             var results = new List<FixResult>();
 
-            // Step 1: 检测承载网络支持
+            // Step 1: 检测承载网络支持 (仅做提示,不阻塞流程)
             SafeAppend("[步骤 1/5] 检测网卡驱动...");
-            var supported = _adapterService.IsHostedNetworkSupported(out _);
+            var supported = _adapterService.IsHostedNetworkSupported(out var driverOutput);
             if (supported != true)
             {
-                SafeAppend("[P1] ❌ 网卡不支持承载网络,无法创建热点");
-                SafeAppend("[建议] 回滚网卡驱动版本,或使用外置 USB 无线网卡");
-                return;
+                SafeAppend($"[P1] ⚠️ 驱动报告不支持承载网络,但工具会尝试启动(之前能用说明硬件无问题)");
             }
-            SafeAppend("[P1] ✅ 网卡支持承载网络");
+            else
+            {
+                SafeAppend("[P1] ✅ 网卡支持承载网络");
+            }
             token.ThrowIfCancellationRequested();
 
             // Step 2: 创建并启动虚拟热点
