@@ -68,7 +68,8 @@ namespace CampusHotspotFix.Interop
         }
 
         /// <summary>
-        /// 对每个连接尝试设置指定类型的共享 —— 不依赖 GUID 匹配。
+        /// 对每个连接尝试设置指定类型的共享。
+        /// 先试 Item(index), 不行就试 _NewEnum 手动枚举。
         /// </summary>
         private static (int Succeeded, int Total, List<string> Details) TrySetSharingOnAll(SharingConnectionType type)
         {
@@ -82,36 +83,95 @@ namespace CampusHotspotFix.Interop
                 int count = (int)collection.Count;
                 details.Add($"共 {count} 个连接");
 
+                // 收集所有原始连接对象
+                var connections = new List<object>();
+
+                // 方法1: 按索引访问 (Item/DISPID 0)
                 for (int i = 1; i <= count; i++)
                 {
-                    total++;
                     try
                     {
-                        object? rawConn = collection.Item(i);
-                        if (rawConn == null)
-                        {
-                            details.Add($"[{i}] null");
-                            continue;
-                        }
-
-                        details.Add($"[{i}] 尝试设置 {(type == SharingConnectionType.Public ? "Public" : "Private")}...");
-                        dynamic config = mgr.INetSharingConfigurationForINetConnection(rawConn);
-                        config.EnableSharing((int)type);
-                        succeeded++;
-                        details.Add($"[{i}] ✓ 成功");
+                        object? c = collection.Item(i);
+                        if (c != null) { connections.Add(c); continue; }
                     }
                     catch (Exception ex)
                     {
-                        details.Add($"[{i}] ✗ {ex.GetType().Name}: {ex.Message}");
+                        details.Add($"[Item#{i}] ✗ {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    // 方法2: 试 _NewEnum 方式 (略, 仅用方法1)
+                }
+
+                // 如果 Item 一个都没取到, 试 _NewEnum
+                if (connections.Count == 0)
+                {
+                    try
+                    {
+                        dynamic rawEnum = collection._NewEnum;
+                        details.Add($"_NewEnum 对象类型: {rawEnum?.GetType()}");
+                    }
+                    catch (Exception ex)
+                    {
+                        details.Add($"_NewEnum 也失败: {ex.Message}");
+                    }
+                }
+
+                total = connections.Count;
+                details.Add($"共获取到 {total} 个连接对象");
+
+                foreach (var rawConn in connections)
+                {
+                    try
+                    {
+                        string label = TryGetConnLabel(rawConn);
+                        details.Add($"[{label}] 尝试 {(type == SharingConnectionType.Public ? "Public" : "Private")}...");
+
+                        dynamic config = mgr.INetSharingConfigurationForINetConnection(rawConn);
+
+                        // 检查当前状态
+                        bool alreadyEnabled;
+                        try { alreadyEnabled = (bool)config.SharingEnabled; }
+                        catch { alreadyEnabled = false; }
+
+                        if (alreadyEnabled)
+                        {
+                            details.Add($"[{label}] 已启用, 跳过");
+                            succeeded++;
+                            continue;
+                        }
+
+                        config.EnableSharing((int)type);
+                        succeeded++;
+                        details.Add($"[{label}] ✓ 成功");
+                    }
+                    catch (Exception ex)
+                    {
+                        details.Add($"[连接] ✗ {ex.GetType().Name}: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                details.Add($"枚举连接集合失败: {ex.Message}");
+                details.Add($"枚举失败: {ex.Message}");
             }
 
             return (succeeded, total, details);
+        }
+
+        /// <summary>
+        /// 尝试读取连接的友好名称(仅用于日志)
+        /// </summary>
+        private static string TryGetConnLabel(object rawConn)
+        {
+            try
+            {
+                dynamic p = ((dynamic)rawConn).GetProperties();
+                return p.Name ?? "?";
+            }
+            catch
+            {
+                return "?";
+            }
         }
     }
 }

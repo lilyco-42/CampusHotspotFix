@@ -363,6 +363,14 @@ namespace CampusHotspotFix.Forms
                     SafeAppend(result.Success
                         ? $"[P2] ✅ ICS 绑定成功: {result.Message}"
                         : $"[P2] ❌ {result.Message}");
+                    if (!result.Success && result.ExceptionDetail != null)
+                    {
+                        foreach (var line in result.ExceptionDetail.Split('\n'))
+                        {
+                            if (!string.IsNullOrWhiteSpace(line))
+                                SafeAppend($"  ╰ {line.Trim()}");
+                        }
+                    }
                 }
 
                 token.ThrowIfCancellationRequested();
