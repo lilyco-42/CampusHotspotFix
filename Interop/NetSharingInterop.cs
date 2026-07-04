@@ -147,10 +147,53 @@ namespace CampusHotspotFix.Interop
                 var mgr = (INetSharingManager)new NetSharingManager();
                 return mgr.SharingInstalled;
             }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 诊断 ICS 组件不可用的具体原因
+        /// </summary>
+        internal static (bool Available, string? ErrorMessage, string? ErrorDetail) DiagnoseIcs()
+        {
+            try
+            {
+                var mgr = (INetSharingManager)new NetSharingManager();
+                bool installed = mgr.SharingInstalled;
+                return (installed, null, null);
+            }
+            catch (InvalidCastException ex)
+            {
+                return (false,
+                    "COM 接口转换失败 — CLSID 或 Interface GUID 不匹配",
+                    $"{ex.GetType().Name}: {ex.Message}\r\n检查注册表 CLSID / Interface GUID 是否与当前系统匹配");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return (false,
+                    "权限不足 — 需要以管理员身份运行",
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+            catch (COMException ex)
+            {
+                string extra = (uint)ex.HResult switch
+                {
+                    0x80040154 => "CLSID 未注册 (REGDB_E_CLASSNOTREG)",
+                    0x80080005 => "COM 服务器无法创建 (CO_E_SERVER_EXEC_FAILURE)",
+                    0x80040111 => "接口不支持 (CLASS_E_NOAGGREGATION)",
+                    _ => $"HRESULT=0x{ex.HResult:X8}",
+                };
+                return (false,
+                    $"COM 异常 — {extra}",
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"ICS COM 创建失败: {ex.Message}");
-                return false;
+                return (false,
+                    $"未预期的错误: {ex.GetType().Name}",
+                    ex.ToString());
             }
         }
 

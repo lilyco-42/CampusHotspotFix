@@ -14,11 +14,18 @@ namespace CampusHotspotFix.Services
     {
         /// <summary>
         /// 检测系统是否安装了 ICS 共享组件。
-        /// 部分精简版 Windows (N/KN/LTSC) 可能缺少此组件。
         /// </summary>
         public bool IsIcsAvailableOnSystem()
         {
             return ComHelper.IsIcsAvailable();
+        }
+
+        /// <summary>
+        /// 检测 ICS 可用性并返回详细信息(供诊断输出)。
+        /// </summary>
+        public (bool Available, string? ErrorMessage, string? ErrorDetail) DiagnoseIcs()
+        {
+            return ComHelper.DiagnoseIcs();
         }
 
         /// <summary>

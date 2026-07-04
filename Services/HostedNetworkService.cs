@@ -28,44 +28,42 @@ namespace CampusHotspotFix.Services
     {
         /// <summary>
         /// 创建并启动虚拟热点。
-        /// 调用前提:NetworkAdapterService.IsHostedNetworkSupported() 必须已经确认返回true,
-        /// 否则这里的命令大概率会失败——但即便调用方没检查,这里也会根据命令的实际返回结果
-        /// 给出明确的FixResult,不会假装成功。
+        /// 先在 raw 输出中找成功标志, 找不到时再用失败标志兜底。
         /// </summary>
-        /// <param name="ssid">自定义热点名称,建议由UI层生成一个不易冲突的默认值,同时允许用户自定义</param>
-        /// <param name="key">热点密码,WPA2要求至少8位字符</param>
         public FixResult Enable(string ssid, string key)
         {
             if (string.IsNullOrWhiteSpace(ssid))
-            {
                 return FixResult.Fail(ProblemCode.P1_HostedNetworkNotAvailable, "热点名称不能为空");
-            }
             if (key.Length < 8)
-            {
                 return FixResult.Fail(ProblemCode.P1_HostedNetworkNotAvailable, "热点密码至少需要8位字符(WPA2要求)");
-            }
 
-            // 第一步:配置承载网络参数(mode=allow 表示允许创建,不是立即启动)
+            // 第一步:配置承载网络参数
             var setResult = CommandRunner.Run("netsh",
                 $"wlan set hostednetwork mode=allow ssid=\"{ssid}\" key=\"{key}\"");
 
-            if (!setResult.ProcessExitedNormally || !setResult.StandardOutput.Contains("已成功"))
+            var setOutput = setResult.StandardOutput;
+            bool setOk = IsSuccessOutput(setOutput);
+
+            if (!setOk)
             {
                 return FixResult.Fail(
                     ProblemCode.P1_HostedNetworkNotAvailable,
                     "配置虚拟热点参数失败,请检查网卡是否支持承载网络",
-                    detail: setResult.StandardOutput + setResult.StandardError);
+                    detail: $"ExitCode={setResult.ExitCode}\r\nstdout:\r\n{setOutput}\r\nstderr:\r\n{setResult.StandardError}");
             }
 
-            // 第二步:真正启动
+            // 第二步:启动热点
             var startResult = CommandRunner.Run("netsh", "wlan start hostednetwork");
 
-            if (!startResult.ProcessExitedNormally || !startResult.StandardOutput.Contains("已启动承载网络"))
+            var startOutput = startResult.StandardOutput;
+            bool startOk = IsSuccessOutput(startOutput);
+
+            if (!startOk)
             {
                 return FixResult.Fail(
                     ProblemCode.P1_HostedNetworkNotAvailable,
                     "虚拟热点启动失败,常见原因是网卡驱动不支持承载网络,或WLAN服务未运行",
-                    detail: startResult.StandardOutput + startResult.StandardError);
+                    detail: $"ExitCode={startResult.ExitCode}\r\nstdout:\r\n{startOutput}\r\nstderr:\r\n{startResult.StandardError}");
             }
 
             return FixResult.Ok(ProblemCode.P1_HostedNetworkNotAvailable, "虚拟热点已成功启动");
@@ -75,7 +73,6 @@ namespace CampusHotspotFix.Services
         {
             var result = CommandRunner.Run("netsh", "wlan stop hostednetwork");
 
-            // "承载网络没有启动"也算是一种可接受的结果(说明本来就没开,目标状态已达成)
             bool acceptable = result.ProcessExitedNormally
                 || result.StandardOutput.Contains("没有启动")
                 || result.StandardOutput.Contains("not started", StringComparison.OrdinalIgnoreCase);
@@ -86,20 +83,12 @@ namespace CampusHotspotFix.Services
                     detail: result.StandardOutput + result.StandardError);
         }
 
-        /// <summary>
-        /// 查询当前热点状态和连接客户端数量。
-        /// ConnectedClientCount这个数据是给DisconnectMonitorService用的——
-        /// 后台定时调用这个方法,记录"客户端数量从>0变为0"的时间点,
-        /// 用于后续判断P5(电源相关)还是P6(运营商检测)。
-        /// </summary>
         public HostedNetworkQueryResult QueryStatus()
         {
             var result = CommandRunner.Run("netsh", "wlan show hostednetwork");
 
             if (!result.ProcessExitedNormally)
-            {
                 return new HostedNetworkQueryResult { Status = HostedNetworkStatus.Unknown, RawOutput = result.StandardError };
-            }
 
             var output = result.StandardOutput;
 
@@ -107,7 +96,6 @@ namespace CampusHotspotFix.Services
                 ? HostedNetworkStatus.Started
                 : HostedNetworkStatus.NotStarted;
 
-            // 输出里有"个数     : N"这一行表示当前连接的客户端数量
             var clientCountMatch = Regex.Match(output, @"(个数|Number of clients)\s*[:：]\s*(\d+)");
             int clientCount = clientCountMatch.Success ? int.Parse(clientCountMatch.Groups[2].Value) : 0;
 
@@ -117,6 +105,31 @@ namespace CampusHotspotFix.Services
                 ConnectedClientCount = clientCount,
                 RawOutput = output,
             };
+        }
+
+        /// <summary>
+        /// 判断 netsh 输出是否表示操作成功。
+        /// 兼容中文/英文关键词变体。
+        /// </summary>
+        private static bool IsSuccessOutput(string output)
+        {
+            // 成功关键词
+            if (output.Contains("已成功", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("已启动", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("The hosted network started", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("The hosted network", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // 如果没有明确失败关键词就算成功(部分 Windows 版本 netsh 不输出明确成功消息)
+            var failKeywords = new[] { "失败", "错误", "error", "fail", "not supported", "is not" };
+            foreach (var kw in failKeywords)
+            {
+                if (output.Contains(kw, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            // ExitCode==0 且非空输出 → 视为成功
+            return !string.IsNullOrWhiteSpace(output);
         }
     }
 }

@@ -228,22 +228,21 @@ namespace CampusHotspotFix.Forms
             SafeAppend($"[P1] 热点状态: {hotspot.Status} | 已连接客户端: {hotspot.ConnectedClientCount}");
 
             // 6. 检测 ICS 可用性 —— 带详细错误
-            try
+            var (icsAvailable, icsError, icsDetail) = _icsShareService.DiagnoseIcs();
+            SafeAppend(icsAvailable
+                ? "[P2] ✅ ICS 共享组件可用"
+                : "[P2] ❌ ICS 共享组件不可用");
+            if (!icsAvailable)
             {
-                bool icsOk = _icsShareService.IsIcsAvailableOnSystem();
-                SafeAppend(icsOk
-                    ? "[P2] ✅ ICS 共享组件可用"
-                    : "[P2] ⚠️ ICS 共享组件不可用");
-                if (!icsOk)
+                SafeAppend($"  原因: {icsError ?? "未知"}");
+                if (icsDetail != null)
                 {
-                    SafeAppend("  原因: INetSharingManager COM 组件创建失败。常见原因:");
-                    SafeAppend("  - 系统为 Windows N/KN/LTSC 精简版");
-                    SafeAppend("  - hnetcfg.dll 未注册 (尝试: regsvr32 hnetcfg.dll)");
+                    // 详细异常信息写入 detail 但不刷屏
+                    System.Diagnostics.Debug.WriteLine(icsDetail);
                 }
-            }
-            catch (Exception ex)
-            {
-                SafeAppend($"[P2] ⚠️ ICS 检测异常: {ex.GetType().Name}: {ex.Message}");
+                SafeAppend("  常见解决方法:");
+                SafeAppend("  - 确认以管理员身份运行此程序");
+                SafeAppend("  - 系统为 Windows N/KN/LTSC 精简版可能需要安装完整版");
             }
 
             // 7. 电源计划
