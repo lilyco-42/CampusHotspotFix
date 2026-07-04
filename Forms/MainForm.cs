@@ -13,6 +13,7 @@ namespace CampusHotspotFix.Forms
         private readonly HostedNetworkService _hostedNetworkService = new();
         private readonly IcsShareService _icsShareService = new();
         private readonly PowerManagementService _powerManagementService = new();
+        private readonly MobileHotspotService _mobileHotspotService = new();
 
         private readonly TextBox _outputBox;
         private readonly TextBox _ssidBox;
@@ -320,22 +321,62 @@ namespace CampusHotspotFix.Forms
             }
             token.ThrowIfCancellationRequested();
 
-            // Step 2: 创建并启动虚拟热点
+            // Step 2: 创建虚拟热点 (netsh hostednetwork)
             SafeAppend("[步骤 2/5] 创建虚拟热点...");
             var enableResult = _hostedNetworkService.Enable(ssid, key);
             results.Add(enableResult);
-            SafeAppend(enableResult.Success
-                ? $"[P1] ✅ 虚拟热点已启动 (SSID: {ssid})"
-                : $"[P1] ❌ 启动失败: {enableResult.Message}");
+            bool hotspotOk = enableResult.Success;
 
-            // 即使已创建过也继续
+            if (hotspotOk)
+            {
+                SafeAppend($"[P1] ✅ 虚拟热点已启动 (SSID: {ssid})");
+            }
+            else
+            {
+                SafeAppend($"[P1] ❌ netsh 热点失败: {enableResult.Message}");
+                SafeAppend("[P1] ⏳ 尝试 Windows 移动热点方案...");
+
+                try
+                {
+                    // 检测硬件是否支持
+                    if (!_mobileHotspotService.IsHotspotSupported())
+                    {
+                        SafeAppend("[P1] ❌ 移动热点硬件不支持");
+                    }
+                    else if (_mobileHotspotService.IsHotspotRunning())
+                    {
+                        SafeAppend("[P1] ✅ 移动热点已在运行中");
+                        hotspotOk = true;
+                    }
+                    else
+                    {
+                        SafeAppend("[信息] 正在启动移动热点...");
+                        var (mhOk, mhMsg) = _mobileHotspotService.StartHotspot();
+                        SafeAppend(mhOk ? $"[P1] ✅ {mhMsg}" : $"[P1] ❌ {mhMsg}");
+                        hotspotOk = mhOk;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SafeAppend($"[P1] ❌ 移动热点异常: {ex.Message}");
+                }
+
+                if (!hotspotOk)
+                {
+                    SafeAppend("---");
+                    SafeAppend("💡 手动方法: 按 Win+A → 展开快捷设置 → 点击「移动热点」");
+                    SafeAppend("   开启后重新运行「一键修复」即可进行 ICS 绑定");
+                }
+            }
+
             token.ThrowIfCancellationRequested();
 
-            // 等待虚拟适配器出现
+            // 等待适配器出现
             SafeAppend("[信息] 等待虚拟适配器初始化...");
             Thread.Sleep(3000);
+            SafeAppend("[信息] 扫描虚拟热点适配器...");
 
-            // Step 3: 查找适配器并绑定 ICS
+            // Step 3: 绑定 ICS 共享
             SafeAppend("[步骤 3/5] 绑定 ICS 共享...");
 
             var pppoeAdapters = _adapterService.GetDialupAdapters();
