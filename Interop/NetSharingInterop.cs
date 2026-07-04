@@ -31,11 +31,13 @@ namespace CampusHotspotFix.Interop
 
     /// <summary>
     /// INetSharingManager — ICS 共享管理器入口。
-    /// ProxyStub: OLE Automation (PSOAInterface)
+    /// 注意:使用 InterfaceIsIDispatch (而非 InterfaceIsDual) 以避免
+    /// vtable 布局不匹配导致的 NullReferenceException。
+    /// IDispatch 通过 DISPID 调用,不依赖 vtable 偏移顺序。
     /// </summary>
     [ComImport]
     [Guid("C08956B7-1CD3-11D1-B1C5-00805FC1270E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
     internal interface INetSharingManager
     {
         [DispId(1)]
@@ -51,11 +53,11 @@ namespace CampusHotspotFix.Interop
 
     /// <summary>
     /// INetSharingEveryConnectionCollection — 连接集合。
-    /// ProxyStub: netshell.dll (PSFactoryBuffer)
+    /// 使用 InterfaceIsIDispatch 避免 vtable 偏移问题。
     /// </summary>
     [ComImport]
     [Guid("33C4643C-7811-46FA-A89A-768597BD7223")]
-    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
     internal interface INetSharingEveryConnectionCollection
     {
         [DispId(1)]
@@ -82,11 +84,11 @@ namespace CampusHotspotFix.Interop
 
     /// <summary>
     /// INetSharingConfiguration — 单条连接的 ICS 共享配置。
-    /// ProxyStub: OLE Automation (PSOAInterface)
+    /// 也使用 InterfaceIsIDispatch 避免 vtable 偏移问题。
     /// </summary>
     [ComImport]
     [Guid("C08956B6-1CD3-11D1-B1C5-00805FC1270E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
     internal interface INetSharingConfiguration
     {
         [DispId(1)]
